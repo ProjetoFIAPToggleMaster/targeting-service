@@ -12,7 +12,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ gihub.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -25,9 +25,16 @@ env:
   BANDIT_VERSION: '1.9.4'
   PYTEST_VERSION: '9.1.1'
 
+# Os quatro jobs abaixo nao declaram 'needs', entao rodam em paralelo e cada
+# um reporta seu proprio status: uma falha de lint nao impede o security scan
+# de executar. Como cada job roda em uma VM propria, todos repetem o checkout
+# e o setup do Python.
 jobs:
-  ci:
-    name: Build, Test, Lint & Security Scan
+  # --------------------------------------------------------------------
+  # BUILD
+  # --------------------------------------------------------------------
+  build:
+    name: Build
     runs-on: ubuntu-latest
 
     steps:
@@ -41,32 +48,46 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      # ------------------------------------------------------------------
-      # BUILD
-      # ------------------------------------------------------------------
-      - name: Build - instala as dependencias
+      - name: Instala as dependencias
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       # 'compileall' valida a sintaxe sem importar o modulo: o app.py abre o
       # pool do Postgres e chama sys.exit(1) em tempo de import.
-      - name: Build - compila o codigo
+      - name: Compila o codigo
         run: python -m compileall -q app.py
 
-      - name: Build - imagem Docker
+      - name: Build da imagem Docker
         run: docker build -t targeting-service:${{ github.sha }} .
 
-      # ------------------------------------------------------------------
-      # TEST
-      # ------------------------------------------------------------------
-      # Os steps de verificacao usam '!cancelled()' para que todos rodem e
-      # reportem seus achados mesmo quando um step anterior falha.
-      - name: Test - pytest
-        if: ${{ !cancelled() }}
-        run: |
-          pip install "pytest==${PYTEST_VERSION}"
+  # --------------------------------------------------------------------
+  # TEST
+  # --------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Configura Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # As dependencias da app entram aqui porque os testes futuros vao
+      # importar o app.py; hoje o scaffold ainda nao usa nenhuma delas.
+      - name: Instala as dependencias de teste
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "pytest==${PYTEST_VERSION}"
+
+      - name: Executa os testes
+        run: |
           # O shell padrao e 'bash -e', entao a saida != 0 do pytest precisa
           # ser capturada para tratarmos o codigo 5 (nenhum teste coletado).
           set +e
@@ -81,36 +102,64 @@ jobs:
 
           exit $code
 
-      # ------------------------------------------------------------------
-      # LINT
-      # ------------------------------------------------------------------
-      - name: Lint - ruff check
-        if: ${{ !cancelled() }}
-        run: |
-          pip install "ruff==${RUFF_VERSION}"
-          ruff check --output-format=github .
+  # --------------------------------------------------------------------
+  # LINT
+  # --------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
 
-      - name: Lint - ruff format
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Configura Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instala o ruff
+        run: pip install "ruff==${RUFF_VERSION}"
+
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+      # '!cancelled()' aqui dentro do job: sem isso, uma falha no 'ruff check'
+      # pularia a checagem de formatacao e esconderia metade dos achados.
+      - name: ruff format
         if: ${{ !cancelled() }}
         run: ruff format --check --diff .
 
-      # ------------------------------------------------------------------
-      # SECURITY SCAN
-      # ------------------------------------------------------------------
+  # --------------------------------------------------------------------
+  # SECURITY SCAN
+  # --------------------------------------------------------------------
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Configura Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instala o bandit
+        run: pip install "bandit==${BANDIT_VERSION}"
+
       # SAST do codigo Python. O bandit nao tem nivel CRITICAL (HIGH e o
       # maximo da escala), entao '-lll' e o equivalente mais proximo do
       # gate CRITICAL do Trivy.
-      - name: Security - Bandit (SAST)
-        if: ${{ !cancelled() }}
-        run: |
-          pip install "bandit==${BANDIT_VERSION}"
-          bandit -r . -lll -x ./venv,./.git
+      - name: Bandit (SAST)
+        run: bandit -r . -lll -x ./venv,./.git
 
       # SCA (+ secrets e misconfig) com Trivy em modo filesystem.
       # 'exit-code: 1' e o gate: apenas achados CRITICAL reprovam o job.
       # Atencao: o filtro de severidade tambem corta o relatorio, entao
       # achados HIGH ou menores nao aparecem no log.
-      - name: Security - Trivy fs (SCA, secrets e misconfig)
+      - name: Trivy fs (SCA, secrets e misconfig)
         if: ${{ !cancelled() }}
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -121,3 +170,37 @@ jobs:
           exit-code: '1'
           ignore-unfixed: false
           format: table
+
+  # --------------------------------------------------------------------
+  # AGREGADOR
+  # --------------------------------------------------------------------
+  # Check unico para o branch protection do main, no lugar dos quatro.
+  #
+  # O 'if: always()' e obrigatorio aqui: sem ele, um job dependente que
+  # falha faz este job ser *pulado*, e o GitHub trata check pulado como
+  # aprovado no branch protection - o merge passaria com a pipeline
+  # vermelha. Com 'always()' o job sempre roda e decide no step abaixo.
+  ci-success:
+    name: CI Success
+    if: ${{ always() }}
+    needs:
+      - build
+      - test
+      - lint
+      - security
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verifica o resultado dos jobs
+        run: |
+          echo "build    : ${{ needs.build.result }}"
+          echo "test     : ${{ needs.test.result }}"
+          echo "lint     : ${{ needs.lint.result }}"
+          echo "security : ${{ needs.security.result }}"
+
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "::error title=Pipeline reprovada::Ao menos um job nao passou - veja os status acima"
+            exit 1
+          fi
+
+          echo "Todos os jobs passaram."
