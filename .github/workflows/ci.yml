@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.12'
+  # Versoes fixas: o conjunto de regras padrao do ruff muda entre releases,
+  # entao sem pin o resultado do gate mudaria sem nenhuma alteracao no codigo.
+  RUFF_VERSION: '0.16.3'
+  BANDIT_VERSION: '1.9.4'
+  PYTEST_VERSION: '9.1.1'
+
+jobs:
+  ci:
+    name: Build, Test, Lint & Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Configura Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # ------------------------------------------------------------------
+      # BUILD
+      # ------------------------------------------------------------------
+      - name: Build - instala as dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 'compileall' valida a sintaxe sem importar o modulo: o app.py abre o
+      # pool do Postgres e chama sys.exit(1) em tempo de import.
+      - name: Build - compila o codigo
+        run: python -m compileall -q app.py
+
+      - name: Build - imagem Docker
+        run: docker build -t targeting-service:${{ github.sha }} .
+
+      # ------------------------------------------------------------------
+      # TEST
+      # ------------------------------------------------------------------
+      # Os steps de verificacao usam '!cancelled()' para que todos rodem e
+      # reportem seus achados mesmo quando um step anterior falha.
+      - name: Test - pytest
+        if: ${{ !cancelled() }}
+        run: |
+          pip install "pytest==${PYTEST_VERSION}"
+
+          # O shell padrao e 'bash -e', entao a saida != 0 do pytest precisa
+          # ser capturada para tratarmos o codigo 5 (nenhum teste coletado).
+          set +e
+          pytest -q
+          code=$?
+          set -e
+
+          if [ "$code" -eq 5 ]; then
+            echo "::warning title=Sem testes::Nenhum teste coletado - o job de teste ainda e um scaffold"
+            exit 0
+          fi
+
+          exit $code
+
+      # ------------------------------------------------------------------
+      # LINT
+      # ------------------------------------------------------------------
+      - name: Lint - ruff check
+        if: ${{ !cancelled() }}
+        run: |
+          pip install "ruff==${RUFF_VERSION}"
+          ruff check --output-format=github .
+
+      - name: Lint - ruff format
+        if: ${{ !cancelled() }}
+        run: ruff format --check --diff .
+
+      # ------------------------------------------------------------------
+      # SECURITY SCAN
+      # ------------------------------------------------------------------
+      # SAST do codigo Python. O bandit nao tem nivel CRITICAL (HIGH e o
+      # maximo da escala), entao '-lll' e o equivalente mais proximo do
+      # gate CRITICAL do Trivy.
+      - name: Security - Bandit (SAST)
+        if: ${{ !cancelled() }}
+        run: |
+          pip install "bandit==${BANDIT_VERSION}"
+          bandit -r . -lll -x ./venv,./.git
+
+      # SCA (+ secrets e misconfig) com Trivy em modo filesystem.
+      # 'exit-code: 1' e o gate: apenas achados CRITICAL reprovam o job.
+      # Atencao: o filtro de severidade tambem corta o relatorio, entao
+      # achados HIGH ou menores nao aparecem no log.
+      - name: Security - Trivy fs (SCA, secrets e misconfig)
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+          format: table
