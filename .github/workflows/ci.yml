@@ -24,6 +24,9 @@ env:
   RUFF_VERSION: '0.16.3'
   BANDIT_VERSION: '1.9.4'
   PYTEST_VERSION: '9.1.1'
+  # Centralizado para nao repetir o nome entre o 'docker build' e o
+  # 'image-ref' do Trivy no job docker.
+  IMAGE_NAME: targeting-service
 
 # Os quatro jobs abaixo nao declaram 'needs', entao rodam em paralelo e cada
 # um reporta seu proprio status: uma falha de lint nao impede o security scan
@@ -33,6 +36,9 @@ jobs:
   # --------------------------------------------------------------------
   # BUILD
   # --------------------------------------------------------------------
+  # Validacao do lado Python: instalar as dependencias e compilar o codigo.
+  # A imagem Docker nao e construida aqui - isso e responsabilidade do job
+  # 'docker', que roda depois do agregador.
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -57,9 +63,6 @@ jobs:
       # pool do Postgres e chama sys.exit(1) em tempo de import.
       - name: Compila o codigo
         run: python -m compileall -q app.py
-
-      - name: Build da imagem Docker
-        run: docker build -t targeting-service:${{ github.sha }} .
 
   # --------------------------------------------------------------------
   # TEST
@@ -204,3 +207,86 @@ jobs:
           fi
 
           echo "Todos os jobs passaram."
+
+  # --------------------------------------------------------------------
+  # DOCKER BUILD & SCAN
+  # --------------------------------------------------------------------
+  # Roda so depois do agregador: nao faz sentido gastar um build de imagem
+  # se lint, teste ou SAST ja reprovaram. Como o 'ci-success' falha quando
+  # qualquer dependencia falha, e o 'needs' aqui usa o if implicito
+  # 'success()', este job e *pulado* nesse caso.
+  #
+  # IMPORTANTE: este job fica FORA do check agregado do 'ci-success'. Para
+  # que ele bloqueie merge, adicione 'Docker Build & Scan' como required
+  # check no branch protection do main, ao lado de 'CI Success'.
+  docker:
+    name: Docker Build & Scan
+    needs: ci-success
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build da imagem Docker
+        run: docker build -t "${IMAGE_NAME}:${GITHUB_SHA}" .
+
+      # Scan da imagem: complementa o 'Trivy fs' do job security, que enxerga
+      # o codigo e o requirements.txt mas nao os pacotes de SO que vem da
+      # imagem base (python:slim).
+      #
+      # 'ignore-unfixed: true' aqui (diferente do fs scan): a base Debian
+      # carrega CVEs sem patch upstream, e reprovar por algo que nao da para
+      # corrigir transformaria o gate em ruido permanente.
+      - name: Trivy image (scan da imagem)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          scanners: vuln,secret
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+
+      # --- Push para o ECR desabilitado: sem acesso a conta AWS no momento ---
+      # Descomente o bloco inteiro quando o acesso voltar, para retomar o push
+      # da imagem. Ao descomentar, lembre de adicionar as permissions que o
+      # push exige - enquanto comentado, o workflow segue so com 'contents: read'.
+      #
+      # ATENCAO: o k8s/overlays/prod/patch-images.yaml aponta para
+      # 'public.ecr.aws/y3u9h2f0/targeting-service:latest', ou seja, ECR
+      # *publico*. Diferente do evaluation-service (que assume ECR privado),
+      # aqui o amazon-ecr-login precisa de 'registry-type: public', e o
+      # registry publico so autentica na regiao us-east-1.
+      #
+      # - name: Configure AWS credentials
+      #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: us-east-1
+      #
+      # - name: Login to Amazon ECR Public
+      #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      #   id: ecr-login
+      #   uses: aws-actions/amazon-ecr-login@v2
+      #   with:
+      #     registry-type: public
+      #
+      # - name: Tag & push image to ECR Public
+      #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      #   env:
+      #     ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+      #     ECR_REGISTRY_ALIAS: y3u9h2f0
+      #     IMAGE_TAG: v1.0.0-${{ github.sha }}
+      #   run: |
+      #     docker tag "${IMAGE_NAME}:${GITHUB_SHA}" "$ECR_REGISTRY/$ECR_REGISTRY_ALIAS/${IMAGE_NAME}:$IMAGE_TAG"
+      #     docker push "$ECR_REGISTRY/$ECR_REGISTRY_ALIAS/${IMAGE_NAME}:$IMAGE_TAG"
+      #
+      # --- Passo GitOps desabilitado: depende do push acima, tambem pausado ---
+      # Quando o acesso a AWS voltar E o bloco acima estiver descomentado,
+      # adicione aqui um step que edita k8s/overlays/prod/patch-images.yaml no
+      # repo raiz com o novo IMAGE_TAG e faz commit+push, para o ArgoCD pegar
+      # a mudanca automaticamente.
