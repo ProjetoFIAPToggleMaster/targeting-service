@@ -258,12 +258,12 @@ jobs:
       # no registry privado da conta, e a regiao deixa de ser fixa em
       # us-east-1 (restricao que so existia para o registry publico).
       - name: Definir SHA curto
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -271,14 +271,14 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
       # Uma unica tag imutavel v1.0.0-<sha curto>, igual aos outros servicos.
       # O repositorio ECR e criado com IMMUTABLE, entao nada de "latest".
       - name: Tag & push image to ECR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           IMAGE_TAG: v1.0.0-${{ steps.vars.outputs.sha_short }}
@@ -293,7 +293,7 @@ jobs:
       # tem permissao sobre ele mesmo, nao sobre o repo raiz.
       # 'ref: master' porque o repo raiz usa master (os servicos usam main).
       - name: Checkout do repo GitOps
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: actions/checkout@v4
         with:
           repository: ProjetoFIAPToggleMaster/toggle-master-microservices
@@ -302,7 +302,7 @@ jobs:
           path: gitops-repo
 
       - name: Atualizar a tag da imagem no repo GitOps
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           IMAGE_TAG: v1.0.0-${{ steps.vars.outputs.sha_short }}
         run: |
