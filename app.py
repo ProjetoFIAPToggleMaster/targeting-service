@@ -100,7 +100,8 @@ def create_rule():
         conn = pool.getconn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(
-            "INSERT INTO targeting_rules (flag_name, is_enabled, rules, created_at, updated_at) "
+            "INSERT INTO targeting_rules "
+            "(flag_name, is_enabled, rules, created_at, updated_at) "
             "VALUES (%s, %s, %s, NOW(), NOW()) RETURNING *",
             (flag_name, is_enabled, Json(rules_obj)),  # Usa Json() para serializar
         )
@@ -127,7 +128,7 @@ def create_rule():
 
 @app.route("/rules/<string:flag_name>", methods=["GET"])
 @require_auth
-def get_rule(flag_name):
+def get_rule(flag_name: str):
     """Busca uma regra de segmentação pelo nome da flag"""
     conn = None
     cur = None
@@ -151,7 +152,7 @@ def get_rule(flag_name):
 
 @app.route("/rules/<string:flag_name>", methods=["PUT"])
 @require_auth
-def update_rule(flag_name):
+def update_rule(flag_name: str):
     """Atualiza a regra de segmentação de uma flag"""
     data = request.get_json()
     if not data:
@@ -174,7 +175,10 @@ def update_rule(flag_name):
 
     values.append(flag_name)  # Adiciona o 'flag_name' para a cláusula WHERE
 
-    query = f"UPDATE targeting_rules SET {', '.join(fields)} WHERE flag_name = %s RETURNING *"
+    query = (
+        f"UPDATE targeting_rules SET {', '.join(fields)} "
+        "WHERE flag_name = %s RETURNING *"
+    )
 
     conn = None
     cur = None
@@ -204,7 +208,7 @@ def update_rule(flag_name):
 
 @app.route("/rules/<string:flag_name>", methods=["DELETE"])
 @require_auth
-def delete_rule(flag_name):
+def delete_rule(flag_name: str):
     """Deleta a regra de segmentação de uma flag"""
     conn = None
     cur = None
