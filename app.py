@@ -114,7 +114,7 @@ def create_rule():
             conn.rollback()
         log.warning(f"Tentativa de criar regra duplicada: '{flag_name}'")
         return jsonify({"error": f"Regra para a flag '{flag_name}' já existe"}), 409
-    except Exception as e:  # noqa: BLE001
+    except psycopg2.Error as e:
         if conn:
             conn.rollback()
         log.error(f"Erro ao criar regra: {e}")
@@ -140,7 +140,7 @@ def get_rule(flag_name: str):
         if not rule:
             return jsonify({"error": "Regra não encontrada"}), 404
         return jsonify(rule)
-    except Exception as e:  # noqa: BLE001
+    except psycopg2.Error as e:
         log.error(f"Erro ao buscar regra '{flag_name}': {e}")
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
     finally:
@@ -194,7 +194,7 @@ def update_rule(flag_name: str):
         conn.commit()
         log.info(f"Regra para '{flag_name}' atualizada com sucesso.")
         return jsonify(updated_rule), 200
-    except Exception as e:  # noqa: BLE001
+    except psycopg2.Error as e:
         if conn:
             conn.rollback()
         log.error(f"Erro ao atualizar regra '{flag_name}': {e}")
@@ -223,7 +223,7 @@ def delete_rule(flag_name: str):
         conn.commit()
         log.info(f"Regra para '{flag_name}' deletada com sucesso.")
         return "", 204  # 204 No Content
-    except Exception as e:  # noqa: BLE001
+    except psycopg2.Error as e:
         if conn:
             conn.rollback()
         log.error(f"Erro ao deletar regra '{flag_name}': {e}")
